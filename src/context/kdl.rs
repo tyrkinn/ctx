@@ -1,7 +1,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use kdl::{KdlDocument, KdlValue};
+use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use crate::context::{self, EnvSet, Envs, TmuxPane, TmuxWindow};
 
@@ -37,20 +37,16 @@ fn parse_pane(node: &kdl::KdlNode) -> Result<TmuxPane> {
     Ok(TmuxPane { name, windows })
 }
 
-fn pairs<I>(mut iter: I) -> impl Iterator<Item = (I::Item, I::Item)>
-where
-    I: Iterator,
-{
-    std::iter::from_fn(move || Some((iter.next()?, iter.next()?)))
-}
-
 fn parse_env_set(node: &kdl::KdlNode) -> Result<EnvSet> {
     let args = node
         .iter_children()
         .map(|c| {
             let k = c.name().to_string();
-            let v = c.get(0).context("Env value required")?.to_string();
-            Ok((k, v))
+            let v = c
+                .get(0)
+                .and_then(KdlValue::as_string)
+                .context("Env set value should be valud string")?;
+            Ok((k, v.to_string()))
         })
         .collect::<Result<HashMap<_, _>>>()?;
     Ok(EnvSet(args))
@@ -96,6 +92,71 @@ impl TryFrom<&str> for context::Context {
     }
 }
 
+fn build_children_doc(ch: &mut Vec<KdlNode>) -> KdlDocument {
+    let mut children_doc = KdlDocument::new();
+    children_doc.nodes_mut().append(ch);
+    children_doc
+}
+
+fn build_window(window: &TmuxWindow) -> KdlNode {
+    let mut node = KdlNode::new("window");
+    node["name"] = KdlValue::String(window.name.to_string());
+    if let Some(cmd) = &window.cmd {
+        node["cmd"] = KdlValue::String(cmd.to_string());
+    }
+
+    node
+}
+
+fn build_pane(pane: &TmuxPane) -> KdlNode {
+    let mut node = KdlNode::new("pane");
+    node["name"] = KdlValue::String(pane.name.to_string());
+    let mut children = pane.windows.iter().map(build_window).collect();
+    node.set_children(build_children_doc(&mut children));
+
+    node
+}
+
+fn build_set((name, set): (&String, &EnvSet)) -> KdlNode {
+    let mut node = KdlNode::new("set");
+    node["name"] = KdlValue::String(name.to_string());
+    let mut children = set
+        .0
+        .iter()
+        .map(|(k, v)| {
+            let mut n = KdlNode::new(k.to_string());
+            n.entries_mut().push(KdlEntry::new(v.to_string()));
+            n
+        })
+        .collect();
+    node.set_children(build_children_doc(&mut children));
+    node
+}
+
+fn build_context(ctx: &context::Context) -> KdlDocument {
+    let mut ctx_node = KdlNode::new("ctx");
+    ctx_node["name"] = KdlValue::String(ctx.name.to_string());
+    ctx_node["root"] = KdlValue::String(ctx.root.to_string_lossy().to_string());
+    let mut panes = ctx.panes.iter().map(build_pane).collect();
+    ctx_node.set_children(build_children_doc(&mut panes));
+
+    let mut env_node = KdlNode::new("env");
+    if let Some(active_env) = &ctx.active_env {
+        env_node["active"] = KdlValue::String(active_env.to_string());
+    };
+    let mut envs = ctx.env_sets.iter().map(build_set).collect();
+    env_node.set_children(build_children_doc(&mut envs));
+
+    let mut doc = KdlDocument::new();
+    doc.nodes_mut().push(ctx_node);
+    doc.nodes_mut().push(env_node);
+    doc
+}
+
 impl Into<String> for context::Context {
-    fn into(self) -> String {}
+    fn into(self) -> String {
+        let mut node = build_context(&self);
+        node.autoformat_no_comments();
+        node.to_string()
+    }
 }
