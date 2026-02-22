@@ -15,4 +15,6 @@ fn main() {
     let mut s = String::new();
     BufReader::new(f).read_to_string(&mut s).unwrap();
     let cfg = Context::try_from(s.as_str()).unwrap();
+    let cfg_string: String = cfg.into();
+    println!("{cfg_string}")
 }
